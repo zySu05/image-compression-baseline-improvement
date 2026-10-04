@@ -1,0 +1,20 @@
+# 基础
+torch>=2.0
+torchvision>=0.15
+numpy
+pillow
+pyyaml
+tqdm
+
+# 图像压缩
+compressai          # Customized 官方用 1.2.0b3，若 API 差异按其仓库要求降级
+
+# 评测指标
+pytorch-msssim
+lpips
+
+# ROI 掩膜（改进 1）
+opencv-python
+
+# 注意：GroundingDINO / SAM2 / Grounded-SAM-2 / CLIPSeg 的依赖按各自仓库单独安装，
+# 由 scripts/setup.sh（或 .bat）clone 后按仓库 README 完成，不在此统一列出。

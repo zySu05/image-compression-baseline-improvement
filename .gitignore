@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 权重与检查点
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# 三方仓库 / 数据 / 实验输出
+third_party/
+data/
+experiments/
+out_masks/
+
+# 工具
+.idea/
+.vscode/
+wandb/
+*.log
+.DS_Store

@@ -1,0 +1,15 @@
+# 默认配置：路径 / 模型 / ROI 方法
+device: cuda
+
+data:
+  kodak: data/kodak
+  coco: data/coco2017
+
+models:
+  arch: cheng2020-anchor       # CompressAI 底座，可选 bmshj2018-factorized / cheng2020-anchor 等
+  qualities: [1, 3, 5, 6]      # 多档 quality（多档基准）
+
+roi:
+  method: grounded_sam2        # grounded_sam2 | clipseg
+  mode: multiclass             # multiclass（点分隔多类别） | sentence（完整句子）
+  clipseg_weights: third_party/clipseg/weights/rd64-uni.pth
