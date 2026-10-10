@@ -87,6 +87,9 @@ python scripts/run_variable_rate.py --arch cheng2020-anchor --qualities 1,3,5,6 
 ## 6. 相关文档
 
 - [复现阶段任务分工.md](复现阶段任务分工.md) —— 阶段规划 / 复现策略 / 分工 / 里程碑
+- [复现阶段工作汇报框架.md](复现阶段工作汇报框架.md) —— 汇报基稿：功能→算法→主辅→复现/改进 的内在逻辑
+- [任务进度记录.md](任务进度记录.md) —— 各模块目前完成情况与待办
+- [baseline算法介绍.md](baseline算法介绍.md) —— 各 baseline 用途与在本项目中的作用
 - [改进1-文本定位方法调研.md](改进1-文本定位方法调研.md)
 - [改进3-可变码率编码方法调研.md](改进3-可变码率编码方法调研.md)
 - [Customized代码迁移方案.md](Customized代码迁移方案.md)
