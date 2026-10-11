@@ -11,7 +11,7 @@
 | 模块 | 含义 | 本文状态 | 官方代码位置 |
 |---|---|---|---|
 | **TMA** | 文本掩膜获取 | ✅ 已解读 | `eval_kodak.py` + `model_tic.py` |
-| CVA | σ 权衡因子 | ⬜ 待补充 | `model_tic.py:403-407`、`train_tic.py:113` |
+| **CVA** | σ 权衡因子 | ✅ 已解读 | `model_tic.py:403-407`、`train_tic.py:113` |
 | LMA | 隐空间掩膜注意力 | ⬜ 待补充 | `model_tic.py:409-424` |
 
 ---
@@ -122,10 +122,79 @@ def inference_clip(model, x, labels, net_lseg, name):
 
 ---
 
-# CVA · σ 权衡因子（待补充）
+# CVA · σ 权衡因子（Customizable σ）
 
-> 位置：`model_tic.py:403-407`、`train_tic.py:113`。后续按上述 TMA 的格式补充。
+## 1. 它是什么
+
+CVA 是论文的"**可定制权衡因子**"：用一个标量 **σ** 显式控制 ROI 与背景的**失真优先级**。ROI 权重 = 1.0，背景权重 = σ（官方**写死 σ = 0.01**）。
+
+做法：把 TMA 的软掩膜阈值化成一张"ROI=1 / 背景=σ"的权重图，乘到重建误差上再求 MSE。这样**背景的误差被 σ 压到几乎忽略不计**，训练时网络自然把比特集中到 ROI、背景少分比特。
+
+一句话：**CVA 通过"失真损失加权"告诉网络——ROI 的保真更重要，背景可以糊。**
+
+## 2. 代码位置
+
+| 文件 | 行号 | 作用 |
+|---|---|---|
+| `model_tic.py` | `forward()` 内（:403-407） | 阈值化 + 上采样 + 重复到 3 通道 |
+| `model_tic.py` | `forward()` 返回（:445） | 把权重图放进 `output["similarity"]` |
+| `train_tic.py` | `RateDistortionLoss.forward`（:113） | 加权 MSE 失真 |
+
+## 3. 核心代码 + 逐行解读
+
+### 3.1 权重图生成（`model_tic.py` forward 内）
+
+```python
+# CVA：把 TMA 的软掩膜 similarity 阈值化成"ROI=1 / 背景=σ"的二值权重图
+#   similarity > 0.85  → 1.0   （ROI：保真优先）
+#   否则               → 0.01  （背景：σ=0.01，失真几乎不计）
+similarity_loss = torch.where(similarity > 0.85, torch.tensor(1.0), torch.tensor(0.01))
+similarity_imp  = torch.where(similarity > 0.85, torch.tensor(1.0), torch.tensor(0.01))
+
+# 上采样 2 倍（双线性）：LSeg 输出 stride=2（H/2×W/2），×2 后对齐到重建图 H×W
+similarity_up = F.interpolate(similarity_loss, scale_factor=2, mode='bilinear')
+# 从 [1,1,H,W] repeat 成 [1,3,H,W]，匹配 RGB 3 通道，才能和 (x_hat - target) 逐元素相乘
+similarity_up_repeated = similarity_up.repeat(1, 3, 1, 1)
+```
+
+返回值里带上它（`model_tic.py:445`）：
+
+```python
+return {
+    "y_hat": y_hat,
+    "y": y,
+    "similarity": similarity_up_repeated,   # 交给损失函数做加权
+    "x_hat": x_hat,
+    "likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
+}
+```
+
+### 3.2 加权失真（`train_tic.py` RateDistortionLoss）
+
+```python
+# 逐像素加权 MSE：背景误差 ×0.01，ROI 误差 ×1.0，再平方平均
+out["mse_loss"] = torch.mean(((output["x_hat"] - target) * output["similarity"]) ** 2)
+# 总损失 = λ·255²·加权MSE + 码率（λ 为拉格朗日系数，控制 RD 权衡）
+out["loss"] = self.lmbda * 255 ** 2 * out["mse_loss"] + out["bpp_loss"]
+```
+
+**逐行解读**：
+
+- `torch.where(similarity > 0.85, 1.0, 0.01)` —— 把连续相似度按阈值 **0.85** 二值化：>0.85 的位置判为 ROI（权重 1.0），其余判为背景（权重 **σ=0.01**）。
+- `similarity_loss` 与 `similarity_imp` **内容完全相同**，只是两个用途：前者给失真损失加权（CVA），后者喂给 `simi_net` 做隐空间调制（LMA）。两处的阈值 0.85 和 σ=0.01 都是**写死的常量**。
+- `scale_factor=2` —— 上采样 2 倍对齐重建图尺寸。LSeg 输出是 stride=2 的 `H/2×W/2`，×2 后正好是 `H×W`，与 `x_hat`/`target` 对齐。
+- `repeat(1, 3, 1, 1)` —— 单通道权重图复制成 3 通道，与 RGB 重建图逐像素相乘。
+- 加权 MSE —— `(x_hat - target) * similarity` 里，背景像素的误差被乘 0.01 后平方，几乎等于 0；ROI 像素误差保留。等价于"只在乎 ROI 的保真"。
+
+## 4. 关键点 / 易错点
+
+1. **σ 是"权衡"不是"保真提升"**：σ=0.01 意味着背景失真被大幅忽略，ROI/背景是**此消彼长**的关系，不是"背景也变好"。这正是学长指出的逻辑点——改进 3 的定位是"连续可调权衡（可控性）"，不是"背景保真提升"。
+2. **σ 和阈值都是写死的离散常量**：`0.85`、`0.01` 硬编码，不是一个可调条件。**这是改进 3 的 (a) 要改的点**——把 `where(sim>0.85, 1.0, 0.01)` 换成连续形式 `w = σ + (1-σ)·mask_prob`，σ 即可连续调节 ROI/背景权衡。
+3. **一张权重图两处用**：`similarity_loss`（→ 失真损失）和 `similarity_imp`（→ LMA 的 `simi_net`）本质是同一张二值图。迁移时若做 σ 连续化，要保证这两处注入的是**同一个连续 σ 信号**，才能让"损失"与"调制"一致。
+4. **分辨率对齐依赖 LSeg 的 stride=2**：这里 `scale_factor=2` 是硬编码，隐含假设"LSeg 输出 = H/2"。换掉 TMA（改进 1 换 Grounded-SAM2）后，掩膜分辨率可能不同，上采样倍数要相应调整，不能照抄 2×。
+
+---
 
 # LMA · 隐空间掩膜注意力（待补充）
 
-> 位置：`model_tic.py:409-424`、`simi_net`（:271-277）、`sub_impor_net`（:350-370）。后续按上述 TMA 的格式补充。
+> 位置：`model_tic.py:409-424`、`simi_net`（:271-277）、`sub_impor_net`（:350-370）。后续按上述 TMA/CVA 的格式补充。
