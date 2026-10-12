@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **TMA** | 文本掩膜获取 | ✅ 已解读 | `eval_kodak.py` + `model_tic.py` |
 | **CVA** | σ 权衡因子 | ✅ 已解读 | `model_tic.py:403-407`、`train_tic.py:113` |
-| LMA | 隐空间掩膜注意力 | ⬜ 待补充 | `model_tic.py:409-424` |
+| **LMA** | 隐空间掩膜注意力 | ✅ 已解读 | `model_tic.py:409-424`、`simi_net`、`sub_impor_net` |
 
 ---
 
@@ -195,6 +195,118 @@ out["loss"] = self.lmbda * 255 ** 2 * out["mse_loss"] + out["bpp_loss"]
 
 ---
 
-# LMA · 隐空间掩膜注意力（待补充）
+# LMA · 隐空间掩膜注意力（Latent Mask Attention）
 
-> 位置：`model_tic.py:409-424`、`simi_net`（:271-277）、`sub_impor_net`（:350-370）。后续按上述 TMA/CVA 的格式补充。
+## 1. 它是什么
+
+LMA 是论文**最核心**的机制：把 ROI 掩膜**注入隐空间**，用「内容重要性 + 文本掩膜调制」去**乘**隐变量，实现对 ROI 多分比特、背景少分比特的**隐式比特分配**。
+
+核心公式：
+
+```
+y = y_codec_a6 * (y_soft + similarities_sigmoid)
+                 └─────────── y_imp ───────────┘
+    编码隐变量     内容重要性      文本掩膜调制
+                 IG（重要性图）   MR（掩膜表示）
+```
+
+LMA 由论文里的**两个子模块**组成，`y_imp` 就是两者的融合：
+
+| 子模块 | 论文含义 | 提取的先验 | 对应代码 |
+|---|---|---|---|
+| **MR**（Mask Representation，掩膜表示） | 从文本掩膜提取"哪里是 ROI" | latent spatial prior（空间先验） | `simi_net` |
+| **IG**（Importance map Generation，重要性图生成） | 从图像内容生成"哪些细节对重建更重要" | latent RDO prior（率失真先验） | `sub_impor_net` |
+
+两者相加得到 latent attention map（`y_imp`），再乘到隐变量 `y_codec_a6` 上。IG 的作用是**避免隐变量从头学习**（复用内容本身的重要性），MR 提供**语义层面的空间引导**。
+
+**为什么叫"隐式"**：不显式在码流里标出 ROI 位置，而是**调制隐变量的幅度**——ROI 处调制值大 → 隐变量被放大 → 量化/熵编码后这些位置信息量更大 → 自然分到更多比特；背景被抑制 → 省比特。比特分配完全由隐变量自身幅度决定，无需额外 ROI 标记。
+
+## 2. 代码位置
+
+| 文件 | 行号 | 作用 |
+|---|---|---|
+| `model_tic.py` | `forward()` 内（:409-424） | **LMA 核心**：调制隐变量 |
+| `model_tic.py` | `simi_net`（:271-277） | **MR（掩膜表示）**：掩膜 1ch → M ch |
+| `model_tic.py` | `sub_impor_net`（:350-370） | **IG（重要性图生成）**：内容侧重要性图 |
+| `model_tic.py` | `sub_net_leaky`/`sub_net0/1/2`/`sub_net_channel`（:254-269） | sub_impor_net 的子结构 |
+| `model_tic.py` | `g_a6`（:140）、`g_a`（:305-315） | 编码器（产生 `y_codec` / `y_codec_a6`） |
+
+## 3. 核心代码 + 逐行解读
+
+### 3.1 两条调制支路的结构
+
+**MR · 文本侧 `simi_net`（`model_tic.py:271-277`）**：把 1 通道掩膜映射成 M 通道调制（提取隐空间空间先验），3 次 stride2 下采样：
+
+```python
+self.simi_net = nn.Sequential(
+    conv(1, 64,  kernel_size=3, stride=2),   # 1→64，H/2→H/4
+    nn.ReLU(),
+    conv(64, 128, kernel_size=3, stride=2),  # 64→128，H/4→H/8
+    nn.ReLU(),
+    conv(128, M, kernel_size=3, stride=2),   # 128→M，H/8→H/16
+)
+```
+
+**IG · 内容侧 `sub_impor_net`（`model_tic.py:350-370`）**：对编码特征学一张"哪里重要"的图（生成隐空间 RDO 先验），先 stride2 下采样再堆 3 个残差块：
+
+```python
+def sub_impor_net(self, x):   # important map（输入 y_codec @ H/8）
+    x1 = self.sub_net_leaky(x)          # conv(N,N,s2)+LeakyReLU：H/8 → H/16
+    x2 = self.sub_net0(x1); x2 = self.sub_net1(x2); x2 = self.sub_net2(x2)
+    x2 = x1 + x2                        # 残差块 ①
+    x3 = self.sub_net0(x2); x3 = self.sub_net1(x3); x3 = self.sub_net2(x3)
+    x3 = x2 + x3                        # 残差块 ②
+    x4 = self.sub_net0(x3); x4 = self.sub_net1(x4); x4 = self.sub_net2(x4)
+    x_out = x4 + x3                     # 残差块 ③
+    x_out = self.sub_net_channel(x_out) # conv(N,M,1x1)：通道压缩 N→M
+    return x_out
+```
+
+其中子结构（`model_tic.py:254-269`）：
+
+```python
+self.sub_net_leaky = nn.Sequential(conv(N, N, k=3, s=2), nn.LeakyReLU())  # 下采样
+self.sub_net0      = nn.Sequential(conv(N, 64, k=1, s=1), nn.ReLU())       # 1x1 降维
+self.sub_net1      = nn.Sequential(conv(64, 64, k=3, s=1), nn.ReLU())      # 3x3 特征
+self.sub_net2      = conv(64, N, k=1, s=1)                                  # 1x1 升维（残差出口）
+self.sub_net_channel = conv(N, M, k=1, s=1)                                 # N→M 通道对齐
+```
+
+### 3.2 隐式比特分配（`model_tic.py` forward 内）
+
+```python
+# ---- MR（掩膜表示）：文本侧 → 隐空间空间先验 ----
+similarities_channel = self.simi_net(similarity_imp)        # 掩膜 [1,1,H/2,W/2] → [1,M,H/16,W/16]
+similarities_sigmoid = torch.sigmoid(similarities_channel)  # sigmoid → (0,1)
+
+# ---- 编码 ----
+y_codec    = self.g_a(x, x_size)   # 编码：x → N ch @ H/8（g_a0..g_a5，共 3 次 stride2）
+y_codec_a6 = self.g_a6(y_codec)    # 再降一次：→ M ch @ H/16
+
+# ---- IG（重要性图生成）：内容侧 → 隐空间 RDO 先验 ----
+y_import = self.sub_impor_net(y_codec)   # y_codec @ H/8 → 重要性图 @ H/16
+y_tanh   = self.tanh(y_import)           # tanh 压缩到 (-1,1)
+y_soft   = self.softsign(y_tanh)         # softsign 再压缩到 (-1,1)（更平滑）
+
+# ---- MR + IG 融合 → 隐式比特分配 ----
+y_imp = y_soft + similarities_sigmoid     # IG(重要性图) + MR(掩膜表示) → [1,M,H/16,W/16]
+y     = y_codec_a6 * y_imp               # ★ 调制隐变量：ROI 放大、背景抑制
+
+# 之后 y 进入超先验 + 熵编码（h_a → entropy_bottleneck → h_s → gaussian_conditional）
+```
+
+**逐行解读**：
+
+- `similarities_sigmoid`（**MR**）：掩膜经 `simi_net` 后 `sigmoid` 到 (0,1)，是**自上而下**的语义调制（隐空间空间先验）——文本所指区域值大、其余值小。
+- `y_soft`（**IG**）：`y_codec` 经 `sub_impor_net` + `tanh` + `softsign`，是**自下而上**的、可学习的内容重要性图（隐空间 RDO 先验），范围 (-1,1)。
+- `y_imp = y_soft + similarities_sigmoid`：MR 与 IG 相加，兼顾"内容本身重不重要"（IG）与"是不是用户关心的语义区域"（MR）。
+- `y = y_codec_a6 * y_imp`：乘回隐变量。ROI 处 `y_imp` 大 → 隐变量幅度大 → 熵编码分配更多比特；背景被抑制 → 省比特。**这就是"隐式比特分配"的核心**。
+- 激活函数分工：`sigmoid`（文本，正调制 0~1）+ `softsign(tanh())`（内容，可正可负 -1~1），允许内容支路既能增强也能抑制。
+
+## 4. 关键点 / 易错点
+
+1. **三路都要汇聚到 H/16**：`simi_net` 3 次 stride2（掩膜 H/2 → H/16）、`g_a6` 1 次 stride2（y_codec H/8 → H/16）、`sub_net_leaky` 1 次 stride2（y_codec H/8 → H/16）。**下采样次数不是随便设的**，是由"输入分辨率 → 隐变量分辨率"的差距决定的。这也是为什么 `simi_net` 恰好 3 个 stride2（因为掩膜在 H/2，而不是原图 H）。
+2. **两条支路都要把通道数对齐到 M**：`simi_net` 末层 `conv(128→M)`、`sub_net_channel` `conv(N→M)`，否则 `y_soft + similarities_sigmoid` 通道对不上。
+3. **这是迁移的核心**：整条 LMA（`simi_net` + `sub_impor_net` + 乘法调制）要搬到改进 3 的可变码率 baseline 上。但新 baseline（TCM 类底座）的隐变量尺寸/通道数与 TIC 不同，`sub_impor_net`/`simi_net` 的 stride 次数和通道数都要按新特征重写（对应 [Customized代码迁移方案.md](Customized代码迁移方案.md) 第七节）。
+4. **官方 `compress`/`decompress` 是半成品**：LMA 的隐式分配逻辑只存在于 `forward` 里；`compress`/`decompress` 版本不一致且未完整实现，训练/评测实际都走 `forward`（见迁移方案第六节）。迁移时应以 `forward` 为准，重写干净的压缩/解压。
+5. **与 CVA 共用同一张掩膜**：`similarity_imp`（给 LMA）和 `similarity_loss`（给 CVA）是同一张二值图。迁移做 σ 连续化时，要保证两处注入的是同一个连续 σ 信号。
