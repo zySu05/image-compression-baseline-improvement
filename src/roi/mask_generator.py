@@ -9,13 +9,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import torch
+import torch.nn.functional as F
 
 
 @dataclass
 class MaskResult:
-    masks: torch.Tensor                      # [N, H, W] 二值掩膜
+    masks: torch.Tensor                      # [N, H, W] 二值掩膜（阈值 0.5）
     labels: List[str] = field(default_factory=list)
     scores: List[float] = field(default_factory=list)
+    probs: Optional[torch.Tensor] = None     # [N, H, W] 软掩膜 0~1，供 TMA 使用
 
 
 class TextMaskGenerator:
@@ -83,35 +85,102 @@ class GroundedSAM2Generator:
 class CLIPSegGenerator:
     """基于 CLIPSeg 的轻量文本→掩膜（可多短语）。
 
-    依赖 third_party/clipseg 与 rd64-uni.pth 权重。
+    backend="hf"（默认）走 HuggingFace transformers，权重自动下载/读缓存：
+        CIDAS/clipseg-rd64-refined
+    backend="local" 走 third_party/clipseg 原始实现，需显式给 weights_path
+    （如 rd64-uni.pth），否则输出是随机掩膜。
+
+    输出同时保留二值 masks 与软掩膜 probs，probs 用于对接 TMA。
     """
 
     def __init__(
         self,
         device: str = "cuda",
+        backend: str = "hf",
+        model_name: str = "CIDAS/clipseg-rd64-refined",
         weights_path: Optional[str] = None,
         version: str = "ViT-B/16",
         reduce_dim: int = 64,
     ):
         self.device = device
-        try:
-            from clipseg.models.clipseg import CLIPDensePredT
-        except ImportError as e:
-            raise ImportError("需要 clipseg：先运行 scripts/setup 克隆到 third_party/clipseg") from e
-        self.model = CLIPDensePredT(version=version, reduce_dim=reduce_dim)
-        if weights_path is not None:
+        self.backend = backend
+
+        if backend == "hf":
+            from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
+
+            self.processor = CLIPSegProcessor.from_pretrained(model_name)
+            self.model = CLIPSegForImageSegmentation.from_pretrained(model_name)
+            self.model.eval().to(device)
+        elif backend == "local":
+            try:
+                from clipseg.models.clipseg import CLIPDensePredT
+            except ImportError as e:
+                raise ImportError(
+                    "local 后端需要 clipseg：pip install -e third_party/clipseg"
+                ) from e
+            if weights_path is None:
+                raise ValueError(
+                    "local 后端必须给 weights_path（如 rd64-uni.pth），"
+                    "否则模型是随机初始化，掩膜无意义"
+                )
+            self.model = CLIPDensePredT(version=version, reduce_dim=reduce_dim)
             state = torch.load(weights_path, map_location=device)
             self.model.load_state_dict(state, strict=False)
-        self.model.eval().to(device)
+            self.model.eval().to(device)
+        else:
+            raise ValueError(f"unknown backend: {backend}")
 
     def generate(self, image, prompts: List[str], mode: str = "multiclass") -> MaskResult:
-        if image.dim() == 3:
-            image = image.unsqueeze(0)  # [1,3,H,W]
-        with torch.no_grad():
-            preds = self.model(image.to(self.device), prompts)
-        if isinstance(preds, (list, tuple)):
-            preds = torch.stack([p if p.dim() == 4 else p.unsqueeze(0) for p in preds], dim=1)
-        probs = torch.sigmoid(preds[0])          # [N,H,W]
+        if image.dim() == 4:
+            image = image[0]
+        if image.dim() != 3:
+            raise ValueError(f"image 应为 [3,H,W] 或 [1,3,H,W]，实际 {tuple(image.shape)}")
+
+        if self.backend == "hf":
+            probs = self._forward_hf(image, prompts)
+        else:
+            probs = self._forward_local(image, prompts)
+
         masks = (probs > 0.5).float()
         scores = probs.flatten(1).max(1).values.cpu().tolist()
-        return MaskResult(masks=masks.cpu(), labels=list(prompts), scores=scores)
+        return MaskResult(
+            masks=masks.cpu(),
+            labels=list(prompts),
+            scores=scores,
+            probs=probs.cpu(),
+        )
+
+    def _upsample(self, probs: torch.Tensor, size) -> torch.Tensor:
+        """[N,h,w] → [N,H,W]，双线性上采样到原图尺寸。"""
+        if probs.dim() == 4 and probs.shape[1] == 1:
+            probs = probs[:, 0]
+        probs = F.interpolate(
+            probs.unsqueeze(1), size=size, mode="bilinear", align_corners=False
+        ).squeeze(1)
+        return probs
+
+    def _forward_hf(self, image: torch.Tensor, prompts: List[str]) -> torch.Tensor:
+        from torchvision.transforms.functional import to_pil_image
+
+        pil = to_pil_image(image.detach().cpu().clamp(0, 1))
+        inputs = self.processor(
+            text=list(prompts),
+            images=[pil] * len(prompts),
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = self.model(**inputs).logits       # [N, h, w]
+        probs = torch.sigmoid(logits.float())
+        return self._upsample(probs, image.shape[-2:])
+
+    def _forward_local(self, image: torch.Tensor, prompts: List[str]) -> torch.Tensor:
+        with torch.no_grad():
+            preds = self.model(image.unsqueeze(0).to(self.device), prompts)
+        if isinstance(preds, (list, tuple)):
+            preds = torch.stack(
+                [p.squeeze(0) if p.dim() == 4 else p for p in preds], dim=0
+            )  # [N,h,w]
+        probs = torch.sigmoid(preds)
+        return self._upsample(probs, image.shape[-2:])
