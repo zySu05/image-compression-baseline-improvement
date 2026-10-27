@@ -30,15 +30,6 @@ Customized 的 TIC 压缩管线，替换论文原版的 LSeg+TMA，输出重建�
     CLIPSeg 输出 sigmoid 概率（背景≈0），默认阈值 0.5；
     论文原版 LSeg 输出余弦相似度（背景基线≈0.8），阈值 0.85。
     本脚本接的是 CLIPSeg，所以默认 --threshold 0.5（与 visualize_mask.py 一致）。
-
-已知坑（跑之前必读，复现阶段发现的第三方代码 bug）：
-    model_tic.py:407-408 在 CUDA 上会报 device mismatch：
-        similarity_loss = torch.where(similarity > 0.85, torch.tensor(1.0), torch.tensor(0.01))
-    这里的 torch.tensor(1.0/0.01) 没指定 device（默认 CPU），而 similarity 在 CUDA 上，
-    torch.where 会抛 "Expected all tensors to be on the same device"。
-    修复（一行，与将来 CVA 连续 σ 的改动点相同）：给这两个 tensor 补 device=similarity.device：
-        torch.tensor(1.0, device=similarity.device) / torch.tensor(0.01, device=similarity.device)
-    （本脚本不改 third_party，保持上游可复现；跑的人本地改这 2 行即可。）
 """
 import argparse
 import math
@@ -113,8 +104,6 @@ def main():
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[device] {device}")
-    if device.startswith("cuda"):
-        print("[warn] CUDA 跑之前需先修 model_tic.py:407-408 的 torch.tensor 缺 device 问题（见脚本头部『已知坑』）")
 
     # ---- 1. 读图 [3,H,W] float [0,1] ----
     from PIL import Image
