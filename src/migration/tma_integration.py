@@ -51,6 +51,22 @@ def merge_masks(probs: torch.Tensor) -> torch.Tensor:
     return probs.max(dim=0).values
 
 
+def prepare_cva_mask(probs: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    """把 MaskResult.probs 合并成 CVA 接口需要的掩膜 [1,1,H,W]。
+
+    对接 src/compression/customized_gain_adapter.py 的
+    CustomizedGainAdapter.compress_joint(x, mask, position, sigma)：
+      - probs: [N,H,W]（来自 src/roi/mask_generator.py 的 MaskResult.probs，取值 [0,1]）
+      - 多类别先 merge 再按 threshold 二值化（ROI=1，背景=0）
+      - 输出 [1,1,H,W] 0/1，直接作为 compress_joint 的 mask 参数
+
+    CVA 内部是「ROI 权重 1、背景权重 σ」的二值区域调制，所以这里给二值掩膜即可；
+    连续 σ（w = σ + (1-σ)·prob）见 roi_modulation.continuous_sigma_mask，属正式迁移。
+    """
+    merged = merge_masks(probs)
+    return (merged >= threshold).float().unsqueeze(0).unsqueeze(0)
+
+
 def prepare_similarity(
     mask: torch.Tensor,
     pad,
