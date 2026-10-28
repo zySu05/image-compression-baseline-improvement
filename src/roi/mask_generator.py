@@ -105,6 +105,9 @@ class CLIPSegGenerator:
         self.device = device
         self.backend = backend
 
+        if backend == "hf" and weights_path:
+            model_name = weights_path
+
         if backend == "hf":
             from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
