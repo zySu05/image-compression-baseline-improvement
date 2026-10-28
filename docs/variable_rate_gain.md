@@ -155,3 +155,56 @@ Customized 相关模块后续可提供：
 与团队现有 TMA/LMA/CVA 模块完成接口对接，
 在同一模型中实现总码率和 ROI/背景权重的联合控制，
 随后开展必要的联合训练和性能验证。
+
+## 9. 与 Customized LMA/CVA 模块的接口约定
+
+### 9.1 当前已提供能力
+
+当前 Gain-Hyperprior 模型支持：
+
+- 连续 Position 调节；
+- 目标 bpp 搜索；
+- 外部 ROI 掩膜输入；
+- sigma 区域权重调制；
+- 编码端与解码端一致的调制参数恢复；
+- 真实熵编码、解码和图像重建。
+
+### 9.2 联合调用接口
+
+```python
+encoded = model.compress_joint(
+    x,
+    mask,
+    position=1.5,
+    sigma=0.3,
+)
+x_hat = model.decompress_joint(encoded)["x_hat"]
+```
+
+输入要求：
+
+- x 为 [1,3,H,W] 的 RGB 图像；
+- mask 为 [1,1,H,W] 的 ROI 掩膜；
+- position 位于 [0,3]；
+- 当前适配器的 sigma 位于 (0,1]。
+
+### 9.3 Customized 模块接入位置
+
+当前区域调制入口为：
+
+`spatial_gain(mask, y_shape, position, sigma)`
+
+后续可根据正式 LMA/CVA 模块输出，
+替换或扩展区域调制方式。
+
+若正式 LMA/CVA 依赖 TIC 编码器内部特征，
+需要进一步修改编码器和解码器接口，
+不能直接视为简单的函数替换。
+
+### 9.4 对接注意事项
+
+- 编码端和解码端必须使用一致的区域调制信息；
+- 若引入可学习模块，应同步加载其训练参数；
+- ROI 掩膜及控制参数需要考虑传输开销；
+- 当前版本是简化适配原型，不等于原始 Customized 完整复现；
+- 后续需验证总码率与 ROI/背景质量控制的联合效果。
