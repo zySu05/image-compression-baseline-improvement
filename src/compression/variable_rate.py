@@ -36,7 +36,7 @@ def compress_one(model, x: torch.Tensor):
     with torch.no_grad():
         out_enc = model.compress(x)
     strings = out_enc["strings"]
-    out_dec = model.decompress(strings, x.shape[-2:])
+    out_dec = model.decompress(strings, out_enc["shape"])
     x_hat = out_dec["x_hat"] if isinstance(out_dec, dict) else out_dec
     return x_hat, strings
 
