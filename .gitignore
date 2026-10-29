@@ -23,3 +23,8 @@ out_masks/
 wandb/
 *.log
 .DS_Store
+
+# Task 4: TMA-CVA-LMA demonstration artifacts
+!docs/experiments/
+!docs/experiments/task4_tma_cva_lma/
+!docs/experiments/task4_tma_cva_lma/**
