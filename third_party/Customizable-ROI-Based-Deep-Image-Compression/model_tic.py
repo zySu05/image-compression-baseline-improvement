@@ -398,34 +398,82 @@ class TIC(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
+    def prepare_cva_similarity(self, similarity, x=None):
+        """CVA：检查 TMA 输出并映射为论文区域权重。"""
+        if not isinstance(similarity, torch.Tensor):
+            raise TypeError("similarity 必须是 torch.Tensor")
+
+        if similarity.ndim != 4 or similarity.shape[1] != 1:
+            raise ValueError(
+                "similarity 应为 [B, 1, H/2, W/2]，"
+                f"实际为 {tuple(similarity.shape)}"
+            )
+
+        if x is not None:
+            if similarity.shape[0] != x.shape[0]:
+                raise ValueError("similarity 与图像批次大小不一致")
+            expected = (x.shape[-2] // 2, x.shape[-1] // 2)
+            if tuple(similarity.shape[-2:]) != expected:
+                raise ValueError(
+                    f"similarity 尺寸应为 {expected}，"
+                    f"实际为 {tuple(similarity.shape[-2:])}"
+                )
+
+        if not torch.isfinite(similarity).all().item():
+            raise ValueError("similarity 存在 NaN 或 Inf")
+
+        if similarity.min().item() < 0 or similarity.max().item() > 1:
+            raise ValueError("similarity 数值必须位于 [0, 1]")
+
+        return torch.where(
+            similarity > 0.85,
+            torch.ones_like(similarity),
+            torch.full_like(similarity, 0.01),
+        )
+
+    def apply_lma_modulation(self, y_codec, cva_weights):
+        """LMA：融合区域相似度与隐空间重要性特征。"""
+        similarities_sigmoid = torch.sigmoid(
+            self.simi_net(cva_weights)
+        )
+
+        y_import = self.sub_impor_net(y_codec)
+        y_soft = self.softsign(self.tanh(y_import))
+        y_codec_a6 = self.g_a6(y_codec)
+
+        if similarities_sigmoid.shape != y_soft.shape:
+            raise RuntimeError(
+                "LMA 特征尺寸不一致："
+                f"{tuple(similarities_sigmoid.shape)} vs "
+                f"{tuple(y_soft.shape)}"
+            )
+
+        if y_codec_a6.shape != y_soft.shape:
+            raise RuntimeError(
+                "LMA 编码特征尺寸不一致："
+                f"{tuple(y_codec_a6.shape)} vs "
+                f"{tuple(y_soft.shape)}"
+            )
+
+        return y_codec_a6 * (y_soft + similarities_sigmoid)
+
     def forward(self, x, similarity):
 
         x_size = (x.shape[2], x.shape[3])
 
         h, w = x.size(2), x.size(3)
 
-        similarity_loss = torch.where(similarity > 0.85, torch.tensor(1.0, device=similarity.device), torch.tensor(0.01, device=similarity.device))
-        similarity_imp = torch.where(similarity > 0.85, torch.tensor(1.0, device=similarity.device), torch.tensor(0.01, device=similarity.device))
+        similarity = similarity.to(device=x.device, dtype=x.dtype)
+        cva_weights = self.prepare_cva_similarity(similarity, x)
 
-        similarity_up = F.interpolate(similarity_loss, scale_factor=2, mode='bilinear')
+        similarity_up = F.interpolate(
+            cva_weights, scale_factor=2, mode="bilinear",
+            align_corners=False
+        )
         similarity_up_repeated = similarity_up.repeat(1, 3, 1, 1)
 
-        similarities_channel = self.simi_net(similarity_imp)
-        similarities_sigmoid = torch.sigmoid(similarities_channel)
-
-
-        y_codec = self.g_a(x, x_size) # y
-        y_codec_a6 = self.g_a6(y_codec)
-
-
-        y_import = self.sub_impor_net(y_codec)
-        y_tanh = self.tanh(y_import)
-        y_soft = self.softsign(y_tanh)
-
-
-
-        y_imp = y_soft + similarities_sigmoid
-        y = y_codec_a6 * y_imp
+        y_codec = self.g_a(x, x_size)
+        y = self.apply_lma_modulation(y_codec, cva_weights)
 
 
         z = self.h_a(y, x_size)
@@ -646,35 +694,11 @@ class TIC(nn.Module):
         x = x.cuda()
         x_size = (x.shape[2], x.shape[3])
 
-        similarity = similarity.cuda()
-        # # #
-        similarity_down_1 = torch.where(similarity == 0, torch.tensor(1e-4), torch.tensor(1.0))
-        #
-        #
+        similarity = similarity.to(device=x.device, dtype=x.dtype)
+        cva_weights = self.prepare_cva_similarity(similarity, x)
 
-
-        # similarity_down_1 = torch.where(similarity > 0.9, torch.tensor(1.0), torch.tensor(1e-4))
-        #
-        similarity_down_1 = F.interpolate(similarity_down_1, scale_factor=0.5, mode='bilinear')
-        similarities_repeated = self.simi_net(similarity_down_1)
-        similarities_repeated = torch.sigmoid(similarities_repeated)
-
-
-        y_codec = self.g_a(x, x_size) # y
-
-        y_import = self.sub_impor_net(y_codec)
-        y_tanh = self.tanh(y_import)
-        y_soft = self.softsign(y_tanh) # important2
-        # y_soft = self.sigmoid(y_soft)
-
-        y_codec_a6 = self.g_a6(y_codec)
-        # y_codec_a6 = self.attetionmap(y_codec_a6)
-
-
-        y_imp = similarities_repeated + y_soft # 相似度* important map
-
-
-        y = y_codec_a6 * y_imp
+        y_codec = self.g_a(x, x_size)
+        y = self.apply_lma_modulation(y_codec, cva_weights)
         #
         # y= y_codec_a6 * y_tanh
 
