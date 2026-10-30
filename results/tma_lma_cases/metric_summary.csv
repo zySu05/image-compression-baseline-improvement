@@ -1,0 +1,10 @@
+﻿case,image,PSNR_dB,MS_SSIM,ROI_PSNR_dB,reconstruction,mask,LPIPS
+airplane_pos0.5,kodim20,19.428922804886458,0.8712870478630066,21.112514996427816,results/tma_lma_cases/airplane_pos0.5/kodim20_recon_pos0.5.png,results/tma_lma_cases/airplane_pos0.5/kodim20_mask.png,0.420812
+airplane_pos1.5,kodim20,19.461939663866247,0.8758864402770996,21.472048563010677,results/tma_lma_cases/airplane_pos1.5/kodim20_recon_pos1.5.png,results/tma_lma_cases/airplane_pos1.5/kodim20_mask.png,0.412484
+airplane_pos2.0,kodim20,19.46187355696033,0.8781765103340149,21.642339733555236,results/tma_lma_cases/airplane_pos2.0/kodim20_recon_pos2.0.png,results/tma_lma_cases/airplane_pos2.0/kodim20_mask.png,0.408386
+barn_pos1.5,kodim22,20.00768126658,0.6407098174095154,21.26918540232999,results/tma_lma_cases/barn_pos1.5/kodim22_recon_pos1.5.png,results/tma_lma_cases/barn_pos1.5/kodim22_mask.png,0.867204
+building_pos0.5,kodim01,21.769840788100225,0.810753583908081,21.93800667181258,results/tma_lma_cases/building_pos0.5/kodim01_recon_pos0.5.png,results/tma_lma_cases/building_pos0.5/kodim01_mask.png,0.578818
+door_pos1.5,kodim01,17.93134567427761,0.44847095012664795,22.91785358043021,results/tma_lma_cases/door_pos1.5/kodim01_recon_pos1.5.png,results/tma_lma_cases/door_pos1.5/kodim01_mask.png,1.031174
+door_pos2.0,kodim01,14.856966006060947,0.19536197185516357,15.38123198645865,results/tma_lma_cases/door_pos2.0/kodim01_recon_pos2.0.png,results/tma_lma_cases/door_pos2.0/kodim01_mask.png,1.078004
+parrots_pos1.5,kodim23,20.462602395951997,0.8371531963348389,20.417371107400243,results/tma_lma_cases/parrots_pos1.5/kodim23_recon_pos1.5.png,results/tma_lma_cases/parrots_pos1.5/kodim23_mask.png,0.502392
+window_pos1.5,kodim01,18.001671659671242,0.47860124707221985,20.585725022575954,results/tma_lma_cases/window_pos1.5/kodim01_recon_pos1.5.png,results/tma_lma_cases/window_pos1.5/kodim01_mask.png,0.973036
